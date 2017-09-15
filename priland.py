@@ -23,21 +23,21 @@ def parse_pages(txt):
 def cb(uid, name, fut):
     d = fut.result()
     d['uid'] = uid
+    print(d)
     return d
 
 
 async def fetch_details(session, url):
     async with session.get(url) as r:
         txt = await r.text('big5-hkscs')
-    return {(i['name'], i['value']) for i in bs(txt, 'html.parser').select('input')}
+    return dict((i['name'], i['value']) for i in bs(txt, 'html.parser').select('input'))
 
 
 async def fetch(session, url, page=1):
     async with session.get(url) as r:
-        txt = await r.text()
-    print(txt, url, page)
-    return []
+        txt = await r.text('big5-hkscs')
     pages, uids = parse_pages(txt), parse_uid(txt)
+    print(pages, uids)
     futs, data = [], []
     if pages:
         futs = [asyncio.ensure_future(fetch(session, URL % p, p)) for p in range(2, pages+1)]
@@ -57,7 +57,7 @@ async def fetch(session, url, page=1):
 
 def main():
     loop = asyncio.get_event_loop()
-    conn = aiohttp.TCPConnector(limit=200)
+    conn = aiohttp.TCPConnector(limit=20)
     session = aiohttp.ClientSession(connector=conn)
     dataset = loop.run_until_complete(fetch(session, URL % 1))
     loop.close()
