@@ -26,10 +26,11 @@ def parse_pages(txt):
 
 def cb(uid, name, fut):
     d = fut.result()
-    d['uid'] = uid
-    print("[%s] Data UID %s fetched." % (datetime.now(), uid))
-    d['name'] = name
-    RECORDED.get('uids', set()).discard(uid)
+    if d:
+        d['uid'] = uid
+        print("[%s] Data UID %s fetched." % (datetime.now(), uid))
+        d['name'] = name
+        RECORDED.get('uids', set()).discard(uid)
 
 
 async def fetch_details(session, url):
@@ -39,9 +40,8 @@ async def fetch_details(session, url):
     if vals:
         return dict((i['name'], i['value']) for i in vals)
     else:
-        print("[%s] Failed to fetch details, retry later..." % datetime.now())
-        await asyncio.sleep(10)
-        return await fetch_details(session, url)
+        print("[%s] Failed to fetch details, exit." % datetime.now())
+        return None
 
 
 async def fetch(session, url, page=1):
@@ -53,9 +53,8 @@ async def fetch(session, url, page=1):
         RECORDED['uids'] = set(uids).union(RECORDED.get('uids', []))
         RECORDED.get('pages', set()).discard(page)
     else:
-        print("[%s] failed to fetch page %s try again later...." % (datetime.now(), page))
-        await asyncio.sleep(10)
-        await fetch(session, url, page)
+        print("[%s] failed to fetch page %s, exit." % (datetime.now(), page))
+        return
 
     if pages:
         RECORDED['pages'] = set(range(2, pages+1))
