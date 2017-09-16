@@ -106,7 +106,6 @@ async def fetch(session, url, page=1):
         RECORDED['pages'] = set(range(2, pages+1))
         print("Total pages:%s/%s" % (page, pages))
         items = [asyncio.ensure_future(fetch(session, URL % p, p)) for p in RECORDED['pages']]
-        # await asyncio.gather(*futs, return_exceptions=True)
 
     for uid, name in uids:
         f = asyncio.ensure_future(fetch_details(session, D_URL % uid))
@@ -126,14 +125,20 @@ def main():
             json.dump([], f)
 
     with open("_record.json") as f:
-        RECORDED.update(json.load(f))
-        RECORDED['decode_err'] = RECORDED.get('decode_err', [])
+        d = f.read()
+    RECORDED.update(json.loads(d or "{}"))
+    RECORDED['decode_err'] = RECORDED.get('decode_err', [])
 
     with open("proxy.json") as f:
         proxies = json.load(f)
     PROXY.put_nowait(None)
     shuffle(proxies)
     [PROXY.put_nowait(i) for i in proxies]
+
+    with open("data.json") as f:
+        data = json.load(f)
+    DATA[0].extend(data[0])
+    DATA.extend(data[1:])
 
     try:
         loop = asyncio.get_event_loop()
