@@ -37,7 +37,7 @@ def cb(uid, name, fut):
     RECORDED.get('uids', set()).discard(uid)
 
 
-async def put_delay(queue, item, delay=5):
+async def put_delay(queue, item, delay=1):
     await asyncio.sleep(delay)
     await queue.put(item)
 
@@ -51,12 +51,13 @@ async def fetch_details(session, url):
     try:
         p = await PROXY.get()
         async with session.get(url, proxy=p) as r:
-            txt = await r.text('big5-hkscs')
-    except UnicodeDecodeError:
+            txt = str(await r.read(), "big5hkscs", errors="replace")
+            # ref: http://bit.ly/2wj8RFV
+    except (LookupError, TypeError):
         RECORDED['decode_err'].append(url)
-        print("[%s] Skip fetch_details due to decode error in %s" % (datetime.now(), uid))
-        await PROXY.put(p)
-        return
+        print("[%s] Force to decode in UID %s" % (datetime.now(), uid))
+        txt = str(txt, error="replace")
+        vals = bs(txt, 'html.parser').select('input')
     except BaseException as e:
         print("[%s] Exception %r occured, try another proxy." % (datetime.now(), e), file=sys.stderr)
         asyncio.ensure_future(put_delay(PROXY, p))
@@ -77,12 +78,13 @@ async def fetch(session, url, page=1):
     try:
         p = await PROXY.get()
         async with session.get(url, proxy=p) as r:
-            txt = await r.text('big5-hkscs')
-    except UnicodeDecodeError:
+            txt = str(await r.read(), "big5hkscs", errors="replace")
+            # ref: http://bit.ly/2wj8RFV
+    except (LookupError, TypeError):
         RECORDED['decode_err'].append(url)
-        print("[%s] Skip fetch due to decode error in page %s" % (datetime.now(), page))
-        await PROXY.put(p)
-        return
+        print("[%s] Force to decode in page %s" % (datetime.now(), page))
+        txt = str(txt, error="replace")
+        pages, uids = parse_pages(txt), parse_uid(txt)
     except BaseException as e:
         print("[%s] Exception %r occured, try another proxy." % (datetime.now(), e), file=sys.stderr)
         asyncio.ensure_future(put_delay(PROXY, p))
@@ -158,12 +160,8 @@ def main():
             RECORDED['uids'] = list(RECORDED['uids'])
             json.dump(RECORDED, f)
 
-        with open("data.json", "r+", encoding="utf8") as f:
-            prev = json.load(f)
-            prev[0] = list(set(DATA[0]).union(prev[0]))
-            prev.extend(DATA[1:])
-            f.seek(0)
-            json.dump(prev, f)
+        with open("data.json", "w", encoding="utf8") as f:
+            json.dump(DATA, f)
 
         session.close()
         loop.close()
