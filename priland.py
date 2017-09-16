@@ -1,8 +1,10 @@
 import os
 import re
+import sys
 import json
 import asyncio
 from html import unescape
+from random import shuffle
 from datetime import datetime
 from functools import partial
 
@@ -12,7 +14,8 @@ from bs4 import BeautifulSoup as bs
 URL = r"http://pri.land.moi.gov.tw/agents_query/iamqry_11a.asp?Page=%s"
 D_URL = r"http://pri.land.moi.gov.tw/agents_query/iamqry_11d2.asp?rowid=%s"
 RECORDED = dict()
-DATA = list()
+DATA = [[]]
+PROXY = asyncio.Queue()
 
 
 def parse_uid(txt):
@@ -20,55 +23,98 @@ def parse_uid(txt):
 
 
 def parse_pages(txt):
-    m = re.search(r"1/(\d+)</F", txt)
+    m = re.search(r">1/(\d+)</F", txt)
     return int(m.group(1)) if m else 0
 
 
 def cb(uid, name, fut):
     d = fut.result()
     if d:
-        d['uid'] = uid
         print("[%s] Data UID %s fetched." % (datetime.now(), uid))
+        d['uid'] = uid
         d['name'] = name
-        RECORDED.get('uids', set()).discard(uid)
+        DATA.append(d)
+    RECORDED.get('uids', set()).discard(uid)
+
+
+async def put_delay(queue, item, delay=5):
+    await asyncio.sleep(delay)
+    await queue.put(item)
 
 
 async def fetch_details(session, url):
-    async with session.get(url) as r:
-        txt = await r.text('big5-hkscs')
-    vals = bs(txt, 'html.parser').select('input')
+    uid = url.replace(D_URL % "", "")
+    if uid in set(i['uid'] for i in DATA[1:]):
+        print("[%s] Skip fetch_details due to UID %s exists." % (datetime.now(), uid))
+        return
+
+    try:
+        p = await PROXY.get()
+        async with session.get(url, proxy=p) as r:
+            txt = await r.text('big5-hkscs')
+    except UnicodeDecodeError:
+        RECORDED['decode_err'].append(url)
+        print("[%s] Skip fetch_details due to decode error in %s" % (datetime.now(), uid))
+        await PROXY.put(p)
+        return
+    except BaseException as e:
+        print("[%s] Exception %r occured, try another proxy." % (datetime.now(), e), file=sys.stderr)
+        asyncio.ensure_future(put_delay(PROXY, p))
+        return await fetch_details(session, url)
+    else:
+        vals = bs(txt, 'html.parser').select('input')
+
     if vals:
+        await PROXY.put(p)
         return dict((i['name'], i['value']) for i in vals)
     else:
-        print("[%s] Failed to fetch details, exit." % datetime.now())
-        return None
+        print("[%s] Failed to fetch details, try another proxy." % datetime.now())
+        asyncio.ensure_future(put_delay(PROXY, p, 601))
+        return await fetch_details(session, url)
 
 
 async def fetch(session, url, page=1):
-    async with session.get(url) as r:
-        txt = await r.text('big5-hkscs')
-    pages, uids = parse_pages(txt), parse_uid(txt)
+    try:
+        p = await PROXY.get()
+        async with session.get(url, proxy=p) as r:
+            txt = await r.text('big5-hkscs')
+    except UnicodeDecodeError:
+        RECORDED['decode_err'].append(url)
+        print("[%s] Skip fetch due to decode error in page %s" % (datetime.now(), page))
+        await PROXY.put(p)
+        return
+    except BaseException as e:
+        print("[%s] Exception %r occured, try another proxy." % (datetime.now(), e), file=sys.stderr)
+        asyncio.ensure_future(put_delay(PROXY, p))
+        return await fetch(session, url, page)
+    else:
+        pages, uids = parse_pages(txt), parse_uid(txt)
 
     if uids:
-        RECORDED['uids'] = set(uids).union(RECORDED.get('uids', []))
-        RECORDED.get('pages', set()).discard(page)
+        RECORDED['uids'] = set(i for i, _ in uids).union(RECORDED.get('uids', []))
+        RECORDED['pages'] = set(RECORDED.get('pages', [])) - {page}
+        # to skip exist uids.
+        uids = [(i, n) for i, n in uids if i not in DATA[0]]
+        DATA[0].extend(i for i, _ in uids)
     else:
-        print("[%s] failed to fetch page %s, exit." % (datetime.now(), page))
-        return
+        print("[%s] failed to fetch page %s, try another proxy." % (datetime.now(), page))
+        asyncio.ensure_future(put_delay(PROXY, p, 601))
+        return await fetch(session, url, page)
 
+    items = []
     if pages:
         RECORDED['pages'] = set(range(2, pages+1))
         print("Total pages:%s/%s" % (page, pages))
-        futs = [asyncio.ensure_future(fetch(session, URL % p, p)) for p in RECORDED['pages']]
-        f = await asyncio.gather(*futs)
+        items = [asyncio.ensure_future(fetch(session, URL % p, p)) for p in RECORDED['pages']]
+        # await asyncio.gather(*futs, return_exceptions=True)
 
-    items = []
     for uid, name in uids:
         f = asyncio.ensure_future(fetch_details(session, D_URL % uid))
         f.add_done_callback(partial(cb, uid, unescape(name)))
         items.append(f)
 
-    await asyncio.gather(*items)
+    await PROXY.put(p)
+    await asyncio.gather(*items, return_exceptions=True)
 
 
 def main():
@@ -81,22 +127,41 @@ def main():
 
     with open("_record.json") as f:
         RECORDED.update(json.load(f))
+        RECORDED['decode_err'] = RECORDED.get('decode_err', [])
+
+    with open("proxy.json") as f:
+        proxies = json.load(f)
+    PROXY.put_nowait(None)
+    shuffle(proxies)
+    [PROXY.put_nowait(i) for i in proxies]
+
     try:
         loop = asyncio.get_event_loop()
-        conn = aiohttp.TCPConnector(limit=15)
+        conn = aiohttp.TCPConnector(limit=200)
         session = aiohttp.ClientSession(connector=conn)
         urls = RECORDED.get('pages', [1])
-        tasks = asyncio.gather(*[fetch(session, URL % i) for i in urls])
-        loop.run_until_complete(tasks)
+        tasks = asyncio.gather(*[fetch(session, URL % i, i) for i in urls], return_exceptions=True)
+        f = loop.run_until_complete(tasks)
+    except asyncio.TimeoutError:
+        f.cancel()
+    else:
+        print(f)
     finally:
-        session.close()
-        loop.close()
+        print(RECORDED)
+        with open("_record.json", "w", encoding='utf8') as f:
+            RECORDED['pages'] = list(RECORDED['pages'])
+            RECORDED['uids'] = list(RECORDED['uids'])
+            json.dump(RECORDED, f)
+
         with open("data.json", "r+", encoding="utf8") as f:
             prev = json.load(f)
-            prev.extend(DATA)
+            prev[0] = list(set(DATA[0]).union(prev[0]))
+            prev.extend(DATA[1:])
             f.seek(0)
             json.dump(prev, f)
 
+        session.close()
+        loop.close()
 
 if __name__ == '__main__':
     main()
